@@ -21,7 +21,7 @@ Each `labels` array is shaped `(N,)` and contains digit labels (`0–9`).
 ## Converted File
 
 - **File**: `mnist.npz`
-- **Format**: NumPy ZIP archive
+- **Format**: Compressed NumPy ZIP archive
 - **Saved using**: `np.savez_compressed(...)`
 
 ### Saved Keys and Their Contents
