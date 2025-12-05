@@ -3,6 +3,29 @@ import random
 import sys
 import numpy as np
 
+# Activation Functions
+def sigmoid(z):
+    """
+    Sigmoid activation function: 1 / (1 + e^(-z))
+    Numerically stable implementation.
+    """
+    return np.where(z >= 0, 
+                    1 / (1 + np.exp(-z)),
+                    np.exp(z) / (1 + np.exp(z)))
+
+def sigmoid_prime(z):
+    """Derivative of sigmoid: sigmoid(z) * (1 - sigmoid(z))"""
+    s = sigmoid(z)
+    return s * (1 - s)
+
+def relu(z):
+    """ReLU activation function: max(0, z)"""
+    return np.maximum(0, z)
+
+def relu_prime(z):
+    """Derivative of ReLU: 1 if z > 0, else 0"""
+    return (z > 0).astype(float)
+
 # Cost Functions
 class QuadraticCost:
     """
@@ -49,53 +72,92 @@ class CrossEntropyCost:
 class NeuralNetwork:
     """
     A fully-connected feedforward neural network trained with stochastic gradient descent.
-    Supports L2 regularization and configurable cost functions.
+    Supports L2 regularization, dropout, multiple activation functions, and Adam optimizer.
     """
-    def __init__(self, layer_sizes, cost=CrossEntropyCost):
+    def __init__(self, layer_sizes, cost=CrossEntropyCost, activation='sigmoid', use_adam=False):
         """
         Initialize the neural network.
         
         Args:
             layer_sizes: list of integers specifying neurons per layer (e.g., [784, 128, 64, 10])
             cost: cost class to use (QuadraticCost or CrossEntropyCost)
+            activation: 'sigmoid' or 'relu' for hidden layers (output always uses sigmoid)
+            use_adam: whether to use Adam optimizer instead of vanilla SGD
         """
         self.layer_sizes = layer_sizes
         self.num_layers = len(layer_sizes)
         self.cost = cost
+        self.activation = activation
+        self.use_adam = use_adam
+        
+        # Set activation functions
+        if activation == 'relu':
+            self.hidden_activation = relu
+            self.hidden_activation_prime = relu_prime
+        else:
+            self.hidden_activation = sigmoid
+            self.hidden_activation_prime = sigmoid_prime
+            
         self.initialize_weights()
+        
+        # Initialize Adam optimizer parameters if needed
+        if use_adam:
+            self.m_weights = [np.zeros(w.shape) for w in self.weights]
+            self.v_weights = [np.zeros(w.shape) for w in self.weights]
+            self.m_biases = [np.zeros(b.shape) for b in self.biases]
+            self.v_biases = [np.zeros(b.shape) for b in self.biases]
+            self.adam_t = 0  # Time step for Adam
 
     def initialize_weights(self):
         """
         Initialize biases and weights using He/Xavier initialization.
-        Weights scaled by 1/sqrt(fan_in) to stabilize training.
+        He initialization for ReLU, Xavier for sigmoid.
         """
-        # Initialize biases: one column vector per hidden/output layer
+        # Initialize biases to small random values
         self.biases = [
-            np.random.randn(num_neurons, 1) 
+            np.random.randn(num_neurons, 1) * 0.01
             for num_neurons in self.layer_sizes[1:]
         ]
         
-        # Initialize weights: one matrix per layer transition
-        # Shape: (output_size, input_size)
-        self.weights = [
-            np.random.randn(output_size, input_size) / np.sqrt(input_size)
-            for input_size, output_size in zip(self.layer_sizes[:-1], self.layer_sizes[1:])
-        ]
+        # Initialize weights with appropriate scaling
+        self.weights = []
+        for i, (input_size, output_size) in enumerate(zip(self.layer_sizes[:-1], self.layer_sizes[1:])):
+            # Use He initialization for ReLU, Xavier for sigmoid
+            if self.activation == 'relu' and i < len(self.layer_sizes) - 2:
+                # He initialization: scale by sqrt(2/fan_in)
+                scale = np.sqrt(2.0 / input_size)
+            else:
+                # Xavier initialization: scale by sqrt(1/fan_in)
+                scale = np.sqrt(1.0 / input_size)
+            
+            self.weights.append(np.random.randn(output_size, input_size) * scale)
 
-    def feed_forward(self, activation):
+    def feed_forward(self, activation, dropout_rate=0.0, training=False):
         """
         Propagate input through network and return output activation.
         
         Args:
             activation: input column vector of shape (784, 1)
+            dropout_rate: probability of dropping neurons (0.0 to 1.0)
+            training: whether in training mode (applies dropout)
             
         Returns:
             output activation of shape (num_output_neurons, 1)
         """
-        # Apply each layer: z = W*a + b, then a = sigmoid(z)
-        for bias, weight in zip(self.biases, self.weights):
+        # Apply hidden layers with chosen activation
+        for i, (bias, weight) in enumerate(zip(self.biases[:-1], self.weights[:-1])):
             weighted_sum = np.dot(weight, activation) + bias
-            activation = sigmoid(weighted_sum)
+            activation = self.hidden_activation(weighted_sum)
+            
+            # Apply dropout during training
+            if training and dropout_rate > 0.0:
+                mask = np.random.binomial(1, 1 - dropout_rate, size=activation.shape)
+                activation = activation * mask / (1 - dropout_rate)
+        
+        # Output layer always uses sigmoid for probability outputs
+        weighted_sum = np.dot(self.weights[-1], activation) + self.biases[-1]
+        activation = sigmoid(weighted_sum)
+        
         return activation
 
     def stochastic_gradient_descent(
@@ -104,7 +166,10 @@ class NeuralNetwork:
         epochs, 
         mini_batch_size, 
         learning_rate,
-        regularization_param=0.0, 
+        regularization_param=0.0,
+        dropout_rate=0.0,
+        lr_decay=0.0,
+        early_stopping_patience=None,
         evaluation_data=None,
         monitor_evaluation_cost=False, 
         monitor_evaluation_accuracy=False,
@@ -118,8 +183,11 @@ class NeuralNetwork:
             training_data: list of (x, y) tuples for training
             epochs: number of passes over training data
             mini_batch_size: number of samples per gradient update
-            learning_rate: learning rate (eta) for weight updates
+            learning_rate: initial learning rate (eta) for weight updates
             regularization_param: L2 regularization strength (lambda)
+            dropout_rate: probability of dropping neurons (0.0 to 1.0)
+            lr_decay: learning rate decay factor per epoch
+            early_stopping_patience: stop if no improvement for N epochs
             evaluation_data: optional (x, y) tuples for validation monitoring
             monitor_*: flags to enable printing of costs/accuracies
             
@@ -137,8 +205,15 @@ class NeuralNetwork:
         evaluation_accuracies = []
         training_costs = []
         training_accuracies = []
+        
+        # Early stopping variables
+        best_accuracy = 0
+        patience_counter = 0
+        best_weights = None
+        best_biases = None
 
         # Main training loop
+        current_lr = learning_rate
         for epoch in range(epochs):
             # Shuffle training data for each epoch
             random.shuffle(training_data)
@@ -153,9 +228,10 @@ class NeuralNetwork:
             for mini_batch in mini_batches:
                 self.update_mini_batch(
                     mini_batch, 
-                    learning_rate, 
+                    current_lr, 
                     regularization_param, 
-                    num_training_samples
+                    num_training_samples,
+                    dropout_rate
                 )
             
             print(f"Epoch {epoch} training complete")
@@ -164,31 +240,60 @@ class NeuralNetwork:
             if monitor_training_cost:
                 training_cost = self.total_cost(training_data, regularization_param)
                 training_costs.append(training_cost)
-                print(f"Cost on training data: {training_cost}")
+                print(f"Cost on training data: {training_cost:.4f}")
             
             # Monitor training accuracy
             if monitor_training_accuracy:
                 correct_train_predictions = self.accuracy(training_data, convert=True)
                 training_accuracies.append(correct_train_predictions)
-                print(f"Accuracy on training data: {correct_train_predictions} / {num_training_samples}")
+                train_acc_pct = (correct_train_predictions / num_training_samples) * 100
+                print(f"Accuracy on training data: {correct_train_predictions} / {num_training_samples} ({train_acc_pct:.2f}%)")
 
             # Monitor evaluation cost
             if monitor_evaluation_cost:
                 evaluation_cost = self.total_cost(evaluation_data, regularization_param, convert=True)
                 evaluation_costs.append(evaluation_cost)
-                print(f"Cost on evaluation data: {evaluation_cost}")
+                print(f"Cost on evaluation data: {evaluation_cost:.4f}")
 
             # Monitor evaluation accuracy
             if monitor_evaluation_accuracy:
                 correct_eval_predictions = self.accuracy(evaluation_data)
                 evaluation_accuracies.append(correct_eval_predictions)
-                print(f"Accuracy on evaluation data: {correct_eval_predictions} / {num_evaluation_samples}")
+                eval_acc_pct = (correct_eval_predictions / num_evaluation_samples) * 100
+                print(f"Accuracy on evaluation data: {correct_eval_predictions} / {num_evaluation_samples} ({eval_acc_pct:.2f}%)")
+                
+                # Early stopping check
+                if early_stopping_patience is not None:
+                    if correct_eval_predictions > best_accuracy:
+                        best_accuracy = correct_eval_predictions
+                        patience_counter = 0
+                        # Save best weights
+                        best_weights = [w.copy() for w in self.weights]
+                        best_biases = [b.copy() for b in self.biases]
+                        print(f"New best accuracy! Resetting patience counter.")
+                    else:
+                        patience_counter += 1
+                        print(f"No improvement. Patience: {patience_counter}/{early_stopping_patience}")
+                        
+                        if patience_counter >= early_stopping_patience:
+                            print(f"Early stopping triggered after {epoch + 1} epochs")
+                            # Restore best weights
+                            if best_weights is not None:
+                                self.weights = best_weights
+                                self.biases = best_biases
+                                print("Restored best weights")
+                            break
+            
+            # Learning rate decay
+            if lr_decay > 0:
+                current_lr = learning_rate / (1 + lr_decay * epoch)
+                print(f"Learning rate: {current_lr:.6f}")
             
             print()
 
         return evaluation_costs, evaluation_accuracies, training_costs, training_accuracies
 
-    def update_mini_batch(self, mini_batch, learning_rate, regularization_param, num_training_samples):
+    def update_mini_batch(self, mini_batch, learning_rate, regularization_param, num_training_samples, dropout_rate=0.0):
         """
         Update network weights and biases using one mini-batch of training data.
         
@@ -197,6 +302,7 @@ class NeuralNetwork:
             learning_rate: learning rate (eta)
             regularization_param: L2 regularization strength (lambda)
             num_training_samples: total number of training samples (for L2 scaling)
+            dropout_rate: probability of dropping neurons during training
         """
         # Initialize gradient accumulators
         accumulated_bias_gradients = [np.zeros(bias.shape) for bias in self.biases]
@@ -204,7 +310,9 @@ class NeuralNetwork:
 
         # Accumulate gradients over all samples in mini-batch
         for sample_input, sample_output in mini_batch:
-            delta_bias_gradients, delta_weight_gradients = self.back_propagate(sample_input, sample_output)
+            delta_bias_gradients, delta_weight_gradients = self.back_propagate(
+                sample_input, sample_output, dropout_rate
+            )
             
             # Add to accumulated gradients
             accumulated_bias_gradients = [
@@ -216,30 +324,67 @@ class NeuralNetwork:
                 for accum_grad, delta_grad in zip(accumulated_weight_gradients, delta_weight_gradients)
             ]
 
-        # Update weights with L2 regularization
-        # w = (1 - eta * lambda / N) * w - (eta / m) * nabla_w
         mini_batch_size = len(mini_batch)
-        regularization_factor = 1 - learning_rate * (regularization_param / num_training_samples)
         
-        self.weights = [
-            regularization_factor * weight - (learning_rate / mini_batch_size) * weight_gradient
-            for weight, weight_gradient in zip(self.weights, accumulated_weight_gradients)
-        ]
-        
-        # Update biases (no regularization on biases)
-        # b = b - (eta / m) * nabla_b
-        self.biases = [
-            bias - (learning_rate / mini_batch_size) * bias_gradient
-            for bias, bias_gradient in zip(self.biases, accumulated_bias_gradients)
-        ]
+        if self.use_adam:
+            # Adam optimizer update
+            self.adam_t += 1
+            beta1, beta2, epsilon = 0.9, 0.999, 1e-8
+            
+            # Update weights
+            for i in range(len(self.weights)):
+                # Average gradient over mini-batch
+                gradient = accumulated_weight_gradients[i] / mini_batch_size
+                
+                # Add L2 regularization gradient
+                gradient += (regularization_param / num_training_samples) * self.weights[i]
+                
+                # Update biased first moment estimate
+                self.m_weights[i] = beta1 * self.m_weights[i] + (1 - beta1) * gradient
+                
+                # Update biased second raw moment estimate
+                self.v_weights[i] = beta2 * self.v_weights[i] + (1 - beta2) * (gradient ** 2)
+                
+                # Compute bias-corrected estimates
+                m_hat = self.m_weights[i] / (1 - beta1 ** self.adam_t)
+                v_hat = self.v_weights[i] / (1 - beta2 ** self.adam_t)
+                
+                # Update weights
+                self.weights[i] -= learning_rate * m_hat / (np.sqrt(v_hat) + epsilon)
+            
+            # Update biases
+            for i in range(len(self.biases)):
+                gradient = accumulated_bias_gradients[i] / mini_batch_size
+                
+                self.m_biases[i] = beta1 * self.m_biases[i] + (1 - beta1) * gradient
+                self.v_biases[i] = beta2 * self.v_biases[i] + (1 - beta2) * (gradient ** 2)
+                
+                m_hat = self.m_biases[i] / (1 - beta1 ** self.adam_t)
+                v_hat = self.v_biases[i] / (1 - beta2 ** self.adam_t)
+                
+                self.biases[i] -= learning_rate * m_hat / (np.sqrt(v_hat) + epsilon)
+        else:
+            # Standard SGD update with L2 regularization
+            regularization_factor = 1 - learning_rate * (regularization_param / num_training_samples)
+            
+            self.weights = [
+                regularization_factor * weight - (learning_rate / mini_batch_size) * weight_gradient
+                for weight, weight_gradient in zip(self.weights, accumulated_weight_gradients)
+            ]
+            
+            self.biases = [
+                bias - (learning_rate / mini_batch_size) * bias_gradient
+                for bias, bias_gradient in zip(self.biases, accumulated_bias_gradients)
+            ]
 
-    def back_propagate(self, sample_input, sample_output):
+    def back_propagate(self, sample_input, sample_output, dropout_rate=0.0):
         """
         Compute gradients for a single training sample using backpropagation.
         
         Args:
             sample_input: input column vector x of shape (784, 1)
             sample_output: target output (one-hot for training, int label for others)
+            dropout_rate: probability of dropping neurons during training
             
         Returns:
             tuple of (bias_gradients, weight_gradients) lists
@@ -252,12 +397,29 @@ class NeuralNetwork:
         current_activation = sample_input
         all_activations = [sample_input]
         all_z_values = []
+        dropout_masks = []
 
-        for layer_bias, layer_weight in zip(self.biases, self.weights):
+        # Hidden layers
+        for i, (layer_bias, layer_weight) in enumerate(zip(self.biases[:-1], self.weights[:-1])):
             weighted_sum = np.dot(layer_weight, current_activation) + layer_bias
             all_z_values.append(weighted_sum)
-            current_activation = sigmoid(weighted_sum)
+            current_activation = self.hidden_activation(weighted_sum)
+            
+            # Apply dropout
+            if dropout_rate > 0.0:
+                mask = np.random.binomial(1, 1 - dropout_rate, size=current_activation.shape)
+                current_activation = current_activation * mask / (1 - dropout_rate)
+                dropout_masks.append(mask)
+            else:
+                dropout_masks.append(None)
+            
             all_activations.append(current_activation)
+        
+        # Output layer (always sigmoid)
+        weighted_sum = np.dot(self.weights[-1], current_activation) + self.biases[-1]
+        all_z_values.append(weighted_sum)
+        current_activation = sigmoid(weighted_sum)
+        all_activations.append(current_activation)
 
         # Backward pass: compute output layer error delta
         output_z = all_z_values[-1]
@@ -270,22 +432,24 @@ class NeuralNetwork:
         weight_gradients[-1] = np.dot(output_delta, previous_activation.transpose())
 
         # Backpropagate error through hidden layers
+        current_delta = output_delta
         for layer_index in range(2, self.num_layers):
             current_z = all_z_values[-layer_index]
-            sigmoid_derivative = sigmoid_prime(current_z)
+            activation_derivative = self.hidden_activation_prime(current_z)
             
             # Propagate delta from next layer
             next_layer_weight = self.weights[-layer_index + 1]
-            previous_delta = output_delta  # Use output_delta as it accumulates through loop
-            current_delta = np.dot(next_layer_weight.transpose(), previous_delta) * sigmoid_derivative
+            current_delta = np.dot(next_layer_weight.transpose(), current_delta) * activation_derivative
+            
+            # Apply dropout mask if used
+            mask_idx = len(dropout_masks) - layer_index + 1
+            if mask_idx >= 0 and mask_idx < len(dropout_masks) and dropout_masks[mask_idx] is not None:
+                current_delta = current_delta * dropout_masks[mask_idx] / (1 - dropout_rate)
             
             # Compute gradients for current layer
             bias_gradients[-layer_index] = current_delta
             previous_activation = all_activations[-layer_index - 1]
             weight_gradients[-layer_index] = np.dot(current_delta, previous_activation.transpose())
-            
-            # Update output_delta for next iteration
-            output_delta = current_delta
             
         return bias_gradients, weight_gradients
 
@@ -365,7 +529,8 @@ class NeuralNetwork:
             "layers": self.layer_sizes,
             "weights": [weight.tolist() for weight in self.weights],
             "biases": [bias.tolist() for bias in self.biases],
-            "cost": str(self.cost.__name__)
+            "cost": str(self.cost.__name__),
+            "activation": self.activation
         }
         
         with open(filename, "w") as output_file:
@@ -389,8 +554,11 @@ def load_network(filename):
     cost_class_name = network_data["cost"]
     cost_class = getattr(sys.modules[__name__], cost_class_name)
     
+    # Get activation function (default to sigmoid for backward compatibility)
+    activation = network_data.get("activation", "sigmoid")
+    
     # Create new network with same architecture
-    network = NeuralNetwork(network_data["layers"], cost=cost_class)
+    network = NeuralNetwork(network_data["layers"], cost=cost_class, activation=activation)
     
     # Restore saved weights and biases as NumPy arrays
     network.weights = [np.array(weight_list) for weight_list in network_data["weights"]]
@@ -411,30 +579,3 @@ def to_categorical(label_index):
     one_hot_vector = np.zeros((10, 1))
     one_hot_vector[label_index] = 1.0
     return one_hot_vector
-
-def sigmoid(z):
-    """
-    Sigmoid activation function: 1 / (1 + e^(-z))
-    
-    Args:
-        z: input value or array
-        
-    Returns:
-        activated output in range (0, 1)
-    """
-    activated_output = 1.0 / (1.0 + np.exp(-z))
-    return activated_output
-
-def sigmoid_prime(z):
-    """
-    Derivative of sigmoid: sigmoid(z) * (1 - sigmoid(z))
-    
-    Args:
-        z: input value or array
-        
-    Returns:
-        derivative value
-    """
-    sigmoid_value = sigmoid(z)
-    derivative = sigmoid_value * (1 - sigmoid_value)
-    return derivative

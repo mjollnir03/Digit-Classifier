@@ -1,4 +1,6 @@
 import numpy as np
+import os
+from datetime import datetime
 from train import NeuralNetwork, CrossEntropyCost, to_categorical
 
 # Load MNIST Dataset from Compressed NumPy Archive
@@ -82,20 +84,24 @@ test_data = prepare_validation_data(test_images, test_labels)
 
 # Initialize Neural Network
 print("\nInitializing neural network...")
-# Deeper architecture for improved feature extraction:
-network = NeuralNetwork([784, 128, 64, 10], cost=CrossEntropyCost)
+# Architecture: 784 input -> 128 hidden (ReLU) -> 64 hidden (ReLU) -> 10 output (sigmoid)
+# Using ReLU activation for better gradient flow and Adam optimizer for faster convergence
+network = NeuralNetwork([784, 128, 64, 10], cost=CrossEntropyCost, activation='relu', use_adam=True)
 
 # Train the Network
 print("Starting neural network training...")
 print("-" * 60)
 
-# Run stochastic gradient descent with monitoring enabled
+# Run stochastic gradient descent with improved hyperparameters
 evaluation_costs, evaluation_accuracies, training_costs, training_accuracies = network.stochastic_gradient_descent(
     training_data=training_data,
-    epochs=20,
-    mini_batch_size=64,
-    learning_rate=0.3,
-    regularization_param=2.0,
+    epochs=30,
+    mini_batch_size=32,
+    learning_rate=0.001,  # Lower learning rate for Adam
+    regularization_param=5.0,
+    dropout_rate=0.2,  # 20% dropout for regularization
+    lr_decay=0.01,  # Small learning rate decay
+    early_stopping_patience=5,  # Stop if no improvement for 5 epochs
     evaluation_data=validation_data,
     monitor_evaluation_cost=True,
     monitor_evaluation_accuracy=True,
@@ -103,10 +109,21 @@ evaluation_costs, evaluation_accuracies, training_costs, training_accuracies = n
     monitor_training_accuracy=True
 )
 
-# Save Trained Model
+# Save Trained Model with backup protection
 print("-" * 60)
-print("\nSaving the trained model to models/digit_classifier.json...")
-network.save('models/digit_classifier.json')
+model_path = 'models/digit_classifier.json'
+
+# If model exists, create a backup with timestamp
+if os.path.exists(model_path):
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    backup_path = f'models/digit_classifier_backup_{timestamp}.json'
+    
+    print(f"\nExisting model found. Creating backup: {backup_path}")
+    import shutil
+    shutil.copy(model_path, backup_path)
+
+print(f"\nSaving the trained model to {model_path}...")
+network.save(model_path)
 print("Model saved successfully.")
 
 # Evaluate on Test Set
