@@ -113,14 +113,10 @@ evaluation_costs, evaluation_accuracies, training_costs, training_accuracies = n
 print("-" * 60)
 model_path = 'models/digit_classifier.json'
 
-# If model exists, create a backup with timestamp
+# Save Model
 if os.path.exists(model_path):
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    backup_path = f'models/digit_classifier_backup_{timestamp}.json'
-    
-    print(f"\nExisting model found. Creating backup: {backup_path}")
-    import shutil
-    shutil.copy(model_path, backup_path)
+    model_path = f'models/digit_classifier_{timestamp}.json'
 
 print(f"\nSaving the trained model to {model_path}...")
 network.save(model_path)
